@@ -10,7 +10,10 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 const PUBLIC = /^\/(index\.html|style\.css|sw\.js|manifest\.webmanifest|js\/[\w-]+\.js|icons\/[\w-]+\.(png|svg))$/;
 
 http.createServer((req, res) => {
-  let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  // Never trust the raw URL: odd paths like "//" or bad %-escapes must not crash the server.
+  let p;
+  try { p = decodeURIComponent((req.url || '/').split('?')[0].replace(/\/{2,}/g, '/')); }
+  catch { res.writeHead(400, { 'content-type': 'text/plain' }); return res.end('Bad request'); }
   if (p === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('ok'); }
   if (p === '/') p = '/index.html';
   if (!PUBLIC.test(p)) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Not found'); }
@@ -22,4 +25,4 @@ http.createServer((req, res) => {
       'cache-control': fresh ? 'no-cache' : 'public, max-age=3600', 'x-content-type-options': 'nosniff' });
     res.end(req.method === 'HEAD' ? undefined : body);
   });
-}).listen(PORT, '0.0.0.0', () => console.log(`Lantern Hall on :${PORT}`));
+}).on('clientError', (e, sock) => sock.destroy()).listen(PORT, '0.0.0.0', () => console.log(`Lantern Hall on :${PORT}`));
