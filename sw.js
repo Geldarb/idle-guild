@@ -1,8 +1,8 @@
 // Bump VERSION on every release so players get the "update available" prompt.
 // Scope is the site root, but /classic/ (Lantern Hall v1) has its own worker and caches, so leave it alone.
 const PREFIX = 'banner-road-';
-const VERSION = PREFIX + '2.0.0';
-const V = '?v=2.0.0';
+const VERSION = PREFIX + '2.1.0';
+const V = '?v=2.1.0';
 const ASSETS = ['./', 'index.html', `style.css${V}`, ...['data', 'game', 'battle', 'ui', 'draw', 'main'].map((f) => `js/${f}.js${V}`),
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 

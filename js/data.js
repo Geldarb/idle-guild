@@ -1,13 +1,14 @@
 // All tunable content lives here: heroes, enemies, worlds, gear and balance numbers.
 'use strict';
 
-const GAME_VERSION = '2.0.0';
+const GAME_VERSION = '2.1.0';
 const GAME_TITLE = 'Banner Road';
 const SAVE_KEY = 'bannerroad-save';
 const CLASSIC_SAVE_KEY = 'lanternhall-save'; // Lantern Hall v1 lives on at /classic/ and keeps this save; never touch it
 const CLASSIC_URL = 'classic/';
 const OFFLINE_CAP_SECONDS = 24 * 3600;
-const PARTY_SIZE = 5;
+const PARTY_SIZE = 6; // formation: slots 0-2 front row, 3-5 back row
+const FRONT_SLOTS = 3;
 const BAG_CAP = 40;
 
 const RESOURCES = {
@@ -17,44 +18,91 @@ const RESOURCES = {
 
 // ---------- heroes ----------
 
+// row: where the class wants to stand. Front row takes the hits; the back row is safe while anyone in front stands.
 const CLASSES = {
-  melee: { name: 'Melee', icon: '🛡️', color: '#d9694a', hp: 130, atk: 7, aspd: 0.8, range: 8, def: 15,
-    blurb: 'Frontline tank. Holds the line so the others can work.' },
-  ranged: { name: 'Ranged', icon: '🏹', color: '#6fbf5a', hp: 70, atk: 8, aspd: 1.5, range: 60, def: 0,
-    blurb: 'Fast shots. Drops enemies before they reach the front.' },
-  mage: { name: 'Mage', icon: '🔮', color: '#8a7cf0', hp: 65, atk: 11, aspd: 0.7, range: 50, def: 0,
-    blurb: 'Spells, heals, buffs and summons.' },
+  guardian: { name: 'Guardian', icon: '🛡️', color: '#4f8fe0', row: 'front', hp: 165, atk: 5, aspd: 0.7, range: 8, def: 25, crit: 0,
+    role: 'Tank', blurb: 'Huge health and armour. Put Guardians in the front row to soak hits.' },
+  warrior: { name: 'Warrior', icon: '⚔️', color: '#e0563f', row: 'front', hp: 120, atk: 8.5, aspd: 0.9, range: 8, def: 12, crit: 0,
+    role: 'Bruiser', blurb: 'Sturdy front-liners with heavy swings.' },
+  rogue: { name: 'Rogue', icon: '🗡️', color: '#9b59d0', row: 'front', hp: 85, atk: 8.5, aspd: 1.3, range: 8, def: 5, crit: 20,
+    role: 'Assassin', blurb: 'Fast blades and big crits. Fragile, so keep a Guardian nearby.' },
+  ranger: { name: 'Ranger', icon: '🏹', color: '#4fb04a', row: 'back', hp: 70, atk: 8, aspd: 1.5, range: 60, def: 0, crit: 5,
+    role: 'Marksman', blurb: 'Rapid arrows from the back row.' },
+  mage: { name: 'Mage', icon: '🔥', color: '#ef8a2a', row: 'back', hp: 65, atk: 10, aspd: 0.7, range: 50, def: 0, crit: 0,
+    role: 'Area damage', blurb: 'Every spell splashes 40% damage onto nearby foes.' },
+  cleric: { name: 'Cleric', icon: '✨', color: '#f2c94c', row: 'back', hp: 80, atk: 5.5, aspd: 0.8, range: 50, def: 5, crit: 0,
+    role: 'Healer', blurb: 'Heals the most wounded hero on every other cast.' },
+  summoner: { name: 'Summoner', icon: '🌀', color: '#2bb3a8', row: 'back', hp: 70, atk: 6.5, aspd: 0.8, range: 50, def: 0, crit: 0,
+    role: 'Summoner', blurb: 'Every 4th cast calls a wisp to fight in the front row for 8s.' },
 };
+const CLASS_IDS = Object.keys(CLASSES);
+const isMeleeClass = (cls) => CLASSES[cls].range <= 10;
 
 const RARITIES = [
-  { id: 'common', name: 'Common', color: '#b9b4ad', mult: 1 },
-  { id: 'uncommon', name: 'Uncommon', color: '#6fd48f', mult: 1.35 },
-  { id: 'rare', name: 'Rare', color: '#5aa8ff', mult: 1.8 },
-  { id: 'epic', name: 'Epic', color: '#c77dff', mult: 2.4 },
-  { id: 'legendary', name: 'Legendary', color: '#ffb547', mult: 3.2 },
+  { id: 'common', name: 'Common', color: '#a7a7a7', mult: 1 },
+  { id: 'uncommon', name: 'Uncommon', color: '#3fc35f', mult: 1.35 },
+  { id: 'rare', name: 'Rare', color: '#3b8cff', mult: 1.8 },
+  { id: 'epic', name: 'Epic', color: '#b05cff', mult: 2.4 },
+  { id: 'legendary', name: 'Legendary', color: '#ff9f1c', mult: 3.2 },
 ];
 const HERO_RARITY_STAT = [1, 1.12, 1.25, 1.42, 1.6];
-const RECRUIT_WEIGHTS = [52, 27, 14, 5.5, 1.5]; // by hero rarity
 const RECRUIT_COST = 1; // seals per summon
 const FREE_SUMMON_SECONDS = 30 * 60;
 const MAX_STARS = 5;
 const STAR_BONUS = 0.25; // +25% hp/atk per star above 1
 const DUPE_AT_MAX_GOLD = 200; // gold per duplicate once a hero is 5 stars (scaled by stage)
 
+// Recruit level: every summon gives 1 recruit XP. Higher levels shift the odds toward rarer heroes.
+// RECRUIT_ODDS[level - 1] = % chance of Common, Uncommon, Rare, Epic, Legendary.
+const RECRUIT_ODDS = [
+  [60, 28, 9, 2.5, 0.5],
+  [55, 30, 11, 3.3, 0.7],
+  [50, 31, 13, 4.8, 1.2],
+  [44, 32, 16, 6.3, 1.7],
+  [38, 32, 19, 8.5, 2.5],
+  [32, 32, 22, 10.5, 3.5],
+  [26, 31, 25, 13, 5],
+  [20, 30, 28, 15.5, 6.5],
+  [15, 28, 30, 18.5, 8.5],
+  [10, 25, 32, 22, 11],
+];
+const RECRUIT_MAX_LEVEL = RECRUIT_ODDS.length;
+const RECRUIT_XP = [3, 5, 7, 10, 13, 16, 20, 25, 30]; // XP from level n to n+1 (one summon = 1 XP)
+
 // Ultimate kinds are implemented in battle.js (ULT_EFFECTS).
+const H = (id, name, cls, rarity, kind, ult, desc) => ({ id, name, cls, rarity, ult: { kind, name: ult, desc } });
 const HEROES = [
-  { id: 'brannoc', name: 'Brannoc Stoneward', cls: 'melee', rarity: 0, ult: { kind: 'slam', name: 'Bulwark Slam', desc: 'Smashes the ground: 2× damage to nearby foes and freezes them for 1.5s.' } },
-  { id: 'kessa', name: 'Kessa Ironvein', cls: 'melee', rarity: 1, ult: { kind: 'bloodthirst', name: 'Bloodthirst', desc: 'For 6s: +40% attack and 60% lifesteal.' } },
-  { id: 'harl', name: 'Old Harl the Unbent', cls: 'melee', rarity: 2, ult: { kind: 'rally', name: 'Rally Banner', desc: 'Shields every hero for 35% of Harl’s max HP.' } },
-  { id: 'vexa', name: 'Vexa Dreadhelm', cls: 'melee', rarity: 3, ult: { kind: 'roar', name: 'Dread Roar', desc: 'Fears all foes for 3s (they flee and stop attacking) and deals 1.5× damage.' } },
-  { id: 'pip', name: 'Pip Quickstring', cls: 'ranged', rarity: 0, ult: { kind: 'volley', name: 'Volley', desc: 'Looses 6 arrows at random foes for 1.3× damage each.' } },
-  { id: 'sorrel', name: 'Sorrel Venomfletch', cls: 'ranged', rarity: 1, ult: { kind: 'viper', name: 'Viper Shot', desc: 'Poisons the 3 nearest foes for 5× damage over 6s.' } },
-  { id: 'tamsin', name: 'Tamsin Farsight', cls: 'ranged', rarity: 2, ult: { kind: 'pin', name: 'Pinning Shot', desc: 'Hits the toughest foe for 7× damage and freezes it for 2s.' } },
-  { id: 'rook', name: 'Rook Hallowbolt', cls: 'ranged', rarity: 4, ult: { kind: 'embers', name: 'Rain of Embers', desc: 'Hits every foe for 1.5× and sets them burning for 3× over 5s.' } },
-  { id: 'wren', name: 'Wren Mossmantle', cls: 'mage', rarity: 0, ult: { kind: 'mend', name: 'Mending Rain', desc: 'Heals every hero for 35% of their max HP.' } },
-  { id: 'ilsabet', name: 'Ilsabet Frostweave', cls: 'mage', rarity: 2, ult: { kind: 'frost', name: 'Glacial Bloom', desc: 'Freezes every foe for 2.5s and deals 1.2× damage.' } },
-  { id: 'corvin', name: 'Corvin Ashtongue', cls: 'mage', rarity: 3, ult: { kind: 'nova', name: 'Cinder Nova', desc: '2.5× damage to every foe, plus a 2× burn over 4s.' } },
-  { id: 'yew', name: 'Mother Yew', cls: 'mage', rarity: 4, ult: { kind: 'grove', name: 'Call of the Grove', desc: 'Summons 2 thorn-stags for 12s and heals the party 20%.' } },
+  // Guardians
+  H('brannoc', 'Brannoc Stoneward', 'guardian', 0, 'slam', 'Bulwark Slam', 'Smashes the ground: 2× damage to nearby foes and freezes them for 1.5s.'),
+  H('doveena', 'Doveena Stillwall', 'guardian', 1, 'taunt', 'Hold the Line', 'Every foe must attack Doveena for 4s, and she gains +50% armour while they try.'),
+  H('harl', 'Old Harl the Unbent', 'guardian', 2, 'rally', 'Rally Banner', 'Shields every hero for 35% of Harl’s max HP.'),
+  H('gorm', 'Gorm Anvilheart', 'guardian', 4, 'bastion', 'Anvil Bastion', 'The whole party takes 45% less damage for 6s and gains a shield worth 20% of Gorm’s HP.'),
+  // Warriors
+  H('tobin', 'Tobin Ashfist', 'warrior', 0, 'cleave', 'Wide Cleave', 'A spinning swing: 2.2× damage to every foe within reach.'),
+  H('kessa', 'Kessa Ironvein', 'warrior', 1, 'bloodthirst', 'Bloodthirst', 'For 6s: +40% attack and 60% lifesteal.'),
+  H('vexa', 'Vexa Dreadhelm', 'warrior', 3, 'roar', 'Dread Roar', 'Fears all foes for 3s (they flee and stop attacking) and deals 1.5× damage.'),
+  // Rogues
+  H('nim', 'Nim Quietstep', 'rogue', 0, 'backstab', 'Backstab', 'Blinks behind the toughest foe for a 4.5× critical strike.'),
+  H('sable', 'Sable Nightreed', 'rogue', 2, 'flurry', 'Knife Flurry', 'Throws 8 knives at random foes, each a guaranteed crit for 0.9×.'),
+  H('kito', 'Kito Smokejaw', 'rogue', 3, 'smoke', 'Venom Smoke', 'Poisons every foe for 3× over 4s and gives Kito +50% attack for 5s.'),
+  // Rangers
+  H('pip', 'Pip Quickstring', 'ranger', 0, 'volley', 'Volley', 'Looses 6 arrows at random foes for 1.3× damage each.'),
+  H('sorrel', 'Sorrel Venomfletch', 'ranger', 1, 'viper', 'Viper Shot', 'Poisons the 3 nearest foes for 5× damage over 6s.'),
+  H('tamsin', 'Tamsin Farsight', 'ranger', 2, 'pin', 'Pinning Shot', 'Hits the toughest foe for 7× damage and freezes it for 2s.'),
+  H('rook', 'Rook Hallowbolt', 'ranger', 4, 'embers', 'Rain of Embers', 'Hits every foe for 1.5× and sets them burning for 3× over 5s.'),
+  // Mages
+  H('bram', 'Bram Sparkwhistle', 'mage', 0, 'zap', 'Chain Spark', 'Lightning jumps between 4 foes for 1.6× each and stuns them for 0.5s.'),
+  H('ilsabet', 'Ilsabet Frostweave', 'mage', 2, 'frost', 'Glacial Bloom', 'Freezes every foe for 2.5s and deals 1.2× damage.'),
+  H('corvin', 'Corvin Ashtongue', 'mage', 3, 'nova', 'Cinder Nova', '2.5× damage to every foe, plus a 2× burn over 4s.'),
+  H('ysolde', 'Ysolde Starcaller', 'mage', 4, 'meteor', 'Falling Star', 'Drops a star on the battlefield: 5× damage to every foe.'),
+  // Clerics
+  H('wren', 'Wren Mossmantle', 'cleric', 0, 'mend', 'Mending Rain', 'Heals every hero for 35% of their max HP.'),
+  H('alder', 'Brother Alder', 'cleric', 1, 'sanctuary', 'Sanctuary', 'Heals every hero 20% now and another 30% over 5s.'),
+  H('maelis', 'Maelis Dawnhand', 'cleric', 3, 'dawn', 'Second Dawn', 'Revives every fallen hero at 60% HP and heals the rest for 25%.'),
+  // Summoners
+  H('fennick', 'Fennick Bonepipe', 'summoner', 1, 'skeletons', 'Rattle Parade', 'Pipes up 3 skeleton soldiers that fight in front for 10s.'),
+  H('odalys', 'Odalys Inkwing', 'summoner', 2, 'spiritwolf', 'Ink Wolf', 'Paints a great ink wolf that fights for 15s with 1.5× Odalys’s attack.'),
+  H('yew', 'Mother Yew', 'summoner', 4, 'grove', 'Call of the Grove', 'Summons 2 thorn-stags for 12s and heals the party 20%.'),
 ];
 const HERO_BY_ID = Object.fromEntries(HEROES.map((h) => [h.id, h]));
 const STARTERS = ['brannoc', 'pip', 'wren'];
@@ -140,3 +188,12 @@ const SALVAGE_BASE = 4; // gold
 // Offline: how much of a live session's earnings you keep while away.
 const OFFLINE_EFFICIENCY = 0.6;
 const OFFLINE_LOOT_EVERY = 240; // seconds per offline loot roll
+
+// One-time redeem codes (case-insensitive). Rewards are applied in game.js redeemCode().
+const REDEEM_CODES = {
+  BANNER2026: { desc: '5,000 gold' },
+  HEROROAD: { desc: '10 Summon Seals (10 free recruits)' },
+  LOOTDROP: { desc: '3 Epic gear items' },
+  FRONTLINE: { desc: '+5 training levels for every hero in your formation' },
+  LEGEND: { desc: 'A guaranteed Legendary hero recruit' },
+};

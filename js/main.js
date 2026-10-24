@@ -82,6 +82,7 @@ const ACTIONS = {
   go: (screen) => {
     if (ui.screen === 'bag' && screen !== 'bag') state.bag.forEach((it) => { it.isNew = false; });
     if (screen === 'bag') state.newItems = 0;
+    if (screen !== ui.screen) { ui.sel = null; if (screen !== 'settings') ui.redeemMsg = null; }
     ui.screen = screen;
   },
   back: () => { ACTIONS.go(SCREENS[ui.screen].parent || 'battle'); },
@@ -89,7 +90,32 @@ const ACTIONS = {
   hero: (id) => { closeModal(); ui.heroId = id; ui.screen = 'hero'; },
   train: (id) => { if (train(state, id)) refreshParty(state); },
   'train-max': (id) => { const n = trainMax(state, id); if (n) { toast(`🏋️ +${n} level${n > 1 ? 's' : ''}`); refreshParty(state); } else toast('Not enough gold to train'); },
-  party: (id) => { toggleParty(state, id); refreshParty(state); },
+  party: (id) => { toggleParty(state, id); ui.sel = null; refreshParty(state); },
+  fslot: (i) => {
+    i = +i;
+    const sel = ui.sel;
+    if (sel?.hero) { setSlot(state, i, sel.hero); ui.sel = null; refreshParty(state); }
+    else if (sel && sel.slot !== undefined && sel.slot !== i) { swapSlots(state, sel.slot, i); ui.sel = null; refreshParty(state); }
+    else if (sel && sel.slot === i) ui.sel = null;
+    else ui.sel = { slot: i };
+  },
+  'bench-pick': (id) => {
+    const sel = ui.sel;
+    if (sel && sel.slot !== undefined) { setSlot(state, sel.slot, id); ui.sel = null; refreshParty(state); }
+    else ui.sel = sel?.hero === id ? null : { hero: id };
+  },
+  bench: (i) => { if (!setSlot(state, +i, null)) toast('Keep at least one hero in the formation'); ui.sel = null; refreshParty(state); },
+  'fsel-clear': () => { ui.sel = null; },
+  'auto-form': () => { autoArrange(state); ui.sel = null; refreshParty(state); toast('✨ Formation arranged: tanks in front, damage behind'); },
+  redeem: () => {
+    const el = $('#redeem-code');
+    const r = redeemCode(state, el ? el.value : '');
+    ui.redeemMsg = r;
+    if (r.ok) {
+      if (r.summon) ui.lastSummon = r.summon;
+      refreshParty(state);
+    }
+  },
   gear: (arg) => { const [id, slot] = arg.split(':'); gearModal(id, slot); },
   equip: (arg) => { const [id, itemId] = arg.split(':'); if (equip(state, id, +itemId)) { refreshParty(state); closeModal(); toast('🛡️ Equipped'); } },
   unequip: (arg) => { const [id, slot] = arg.split(':'); if (unequip(state, id, slot)) refreshParty(state); },
@@ -100,6 +126,14 @@ const ACTIONS = {
   'auto-ult': () => { state.settings.autoUlt = !state.settings.autoUlt; },
   ult: (id) => { if (!manualUlt(state, id)) toast('Not charged yet'); return NO_RENDER; },
   summon: () => doSummon(false),
+  'summon-10': () => {
+    const lv = state.recruit.level, rs = summonMany(state, 10);
+    if (!rs.length) return;
+    ui.lastSummons = rs; ui.lastSummon = null;
+    const fresh = rs.filter((r) => r.isNew).length, best = Math.max(...rs.map((r) => HERO_BY_ID[r.heroId].rarity));
+    toast(`🔮 ×${rs.length}: best ${rarName(best)}${fresh ? `, ${fresh} new` : ''}${state.recruit.level > lv ? ` · ⬆️ Recruit Lv ${state.recruit.level}!` : ''}`, state.recruit.level > lv ? 'loot' : '');
+    refreshParty(state);
+  },
   'summon-free': () => doSummon(true),
   travel: (g) => { if (travel(state, +g)) { restartBattle(state); ui.screen = 'battle'; } },
   fullscreen: () => {
@@ -141,9 +175,10 @@ const ACTIONS = {
 function doSummon(free) {
   const r = summon(state, free);
   if (!r) return;
-  ui.lastSummon = r;
+  ui.lastSummon = r; ui.lastSummons = null;
   const d = HERO_BY_ID[r.heroId];
   toast(r.isNew ? `🎉 <b style="color:${RARITIES[d.rarity].color}">${esc(d.name)}</b> joins!` : r.stars ? `⭐ ${esc(d.name)} is now ${r.stars}★` : `🪙 +${fmt(r.gold)} from a duplicate`);
+  if (r.recruitUp) toast(`⬆️ Recruit Level ${state.recruit.level}! Rarer heroes now`, 'loot');
   refreshParty(state);
 }
 
@@ -170,6 +205,11 @@ document.addEventListener('click', (e) => {
   if (result instanceof Promise || result === NO_RENDER) return;
   save();
   render();
+});
+
+// Enter in the redeem box redeems.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'redeem-code') { e.preventDefault(); ACTIONS.redeem(); save(); render(); }
 });
 
 document.addEventListener('change', (e) => {

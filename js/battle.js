@@ -3,8 +3,11 @@
 'use strict';
 
 const STEP = 0.05; // seconds per simulation step
-const HOME_X = { melee: 36, ranged: 23, mage: 12 };
-const ROW_Y = [0.5, 0.18, 0.82, 0.34, 0.66];
+// Formation: slots 0-2 stand in the front row, 3-5 in the back row, one per lane.
+const FRONT_X = 40, BACK_X = 22;
+const LANE_Y = [0.22, 0.5, 0.78];
+const slotX = (slot) => (slot < FRONT_SLOTS ? FRONT_X : BACK_X) + (slot % 3 === 1 ? 2.5 : 0);
+const slotY = (slot) => LANE_Y[slot % 3];
 
 let battle = null;
 
@@ -18,17 +21,17 @@ function newBattle(s) {
 
 function placeParty(s, b, keepHp = false) {
   const old = Object.fromEntries(b.units.filter((u) => u.heroId).map((u) => [u.heroId, u]));
-  b.units = b.units.filter((u) => u.side === 'foe');
-  const order = { melee: 0, ranged: 1, mage: 2 };
-  const ids = [...s.party].sort((a, c) => order[HERO_BY_ID[a].cls] - order[HERO_BY_ID[c].cls]);
-  const perClass = {};
-  ids.forEach((id, i) => {
+  b.units = b.units.filter((u) => u.side === 'foe' || u.summon);
+  s.formation.forEach((id, slot) => {
+    if (!id) return;
     const h = s.heroes[id], def = HERO_BY_ID[id], st = heroStats(h);
-    const n = perClass[def.cls] = (perClass[def.cls] || 0) + 1;
     const prev = keepHp ? old[id] : null;
-    const u = makeUnit('hero', st, HOME_X[def.cls] - (n - 1) * 4, ROW_Y[i % ROW_Y.length]);
-    Object.assign(u, { heroId: id, cls: def.cls, ultKind: def.ult.kind, ult: prev ? prev.ult : 0, home: u.x });
-    if (prev) { u.hp = Math.min(u.maxHp, prev.hp * (u.maxHp / prev.maxHp)); u.down = prev.down; u.reviveAt = prev.reviveAt; u.x = prev.x; }
+    const u = makeUnit('hero', st, slotX(slot), slotY(slot));
+    Object.assign(u, { heroId: id, cls: def.cls, ultKind: def.ult.kind, ult: prev ? prev.ult : 0, home: u.x, slot, row: slotRow(slot) });
+    if (prev) {
+      u.hp = Math.min(u.maxHp, prev.hp * (u.maxHp / prev.maxHp)); u.down = prev.down; u.reviveAt = prev.reviveAt; u.casts = prev.casts;
+      if (prev.slot === slot) u.x = prev.x;
+    }
     b.units.push(u);
   });
 }
@@ -64,6 +67,14 @@ function startWave(s, b) {
 const heroes = (b) => b.units.filter((u) => u.side === 'hero' && !u.down);
 const foes = (b) => b.units.filter((u) => u.side === 'foe' && u.hp > 0);
 const front = (list) => list.reduce((m, u) => (!m || u.x > m.x ? u : m), null);
+// Who the enemies attack: a taunting hero, else the front row (summons fight in front), else the back row.
+function foeTarget(b) {
+  const hs = heroes(b);
+  if (b.taunt && b.t < b.taunt.until && !b.taunt.u.down) return b.taunt.u;
+  const fr = hs.filter((u) => u.row === 'front' || u.summon);
+  return front(fr.length ? fr : hs);
+}
+const frontStanding = (b) => heroes(b).some((u) => u.heroId && u.row === 'front');
 const nearestFoe = (b) => foes(b).reduce((m, u) => (!m || u.x < m.x ? u : m), null);
 
 function float(b, u, text, color, big = false) {
@@ -75,7 +86,8 @@ function hit(s, b, src, tgt, dmg, opts = {}) {
   if (tgt.hp <= 0 || tgt.down) return 0;
   let crit = false;
   if (!opts.noCrit && src && Math.random() * 100 < src.crit) { dmg *= 1.8; crit = true; }
-  dmg *= 1 - (tgt.def || 0) / 100;
+  dmg *= 1 - Math.min(80, (tgt.def || 0) + (tgt.buff?.def || 0)) / 100;
+  if (tgt.side === 'hero' && b.ward && b.t < b.ward.until) dmg *= b.ward.mul;
   if (tgt.shield > 0) { const a = Math.min(tgt.shield, dmg); tgt.shield -= a; dmg -= a; }
   tgt.hp -= dmg;
   if (src && src.side === 'hero') {
@@ -109,7 +121,7 @@ function onDeath(s, b, u) {
   float(b, u, `+${gold}🪙`, '#ffc94a');
   const xp = xpPerKill(g) * mult;
   b.secXp += xp;
-  for (const id of s.party) gainXp(s, s.heroes[id], xp, b.events);
+  for (const id of partyOf(s)) gainXp(s, s.heroes[id], xp, b.events);
   const drops = u.boss === 2 ? 2 : u.boss === 1 ? 1 : (Math.random() < ITEM_DROP_CHANCE ? 1 : 0);
   for (let i = 0; i < drops; i++) {
     const item = rollLoot(s, g, u.boss ? BOSS_LOOT_WEIGHTS : LOOT_RARITY_WEIGHTS);
@@ -129,7 +141,8 @@ function onDeath(s, b, u) {
 function ultTargetsReady(b, u) {
   const fs = foes(b);
   if (!fs.length || fs.every((f) => f.x > 96)) return false;
-  if (u.ultKind === 'mend' || u.ultKind === 'rally') return heroes(b).some((h) => h.hp / h.maxHp < 0.7);
+  if (['mend', 'rally', 'sanctuary', 'bastion'].includes(u.ultKind)) return heroes(b).some((h) => h.hp / h.maxHp < 0.7);
+  if (u.ultKind === 'dawn') return b.units.some((h) => h.heroId && h.down) || heroes(b).some((h) => h.hp / h.maxHp < 0.45);
   return true;
 }
 
@@ -175,14 +188,71 @@ const ULT_EFFECTS = {
   },
   grove(s, b, u) {
     for (const h of heroes(b)) heal(b, h, h.maxHp * 0.2);
-    const fx = front(heroes(b))?.x ?? 40;
-    for (let i = 0; i < 2; i++) {
-      const w = makeUnit('hero', { hp: u.maxHp * 0.9, atk: u.atk * 0.8, aspd: 1.1, range: 8, def: 20 }, fx + 3, i ? 0.3 : 0.7);
-      Object.assign(w, { summon: true, icon: '🦌', expires: b.t + 12, home: w.x, cls: 'melee' });
-      b.units.push(w);
-    }
+    for (let i = 0; i < 2; i++) summonUnit(b, u, 'stag', { hp: 0.9, atk: 0.8, def: 20 }, 12, i ? 0.32 : 0.68);
   },
+  taunt(s, b, u) {
+    b.taunt = { u, until: b.t + 4 };
+    u.buff = { def: 50, until: b.t + 4, color: '#7fb6ff' };
+    b.fx.push({ kind: 'ring', x: u.x, y: u.y, t0: b.t, dur: 0.6, color: '#7fb6ff', r: 30 });
+  },
+  bastion(s, b, u) {
+    b.ward = { mul: 0.55, until: b.t + 6 };
+    for (const h of heroes(b)) h.shield = Math.max(h.shield, u.maxHp * 0.2);
+    b.fx.push({ kind: 'party', t0: b.t, dur: 0.8, color: '#9fc7ff' });
+  },
+  cleave(s, b, u) {
+    for (const f of foes(b)) if (f.x - u.x < 26) hit(s, b, u, f, u.atk * 2.2);
+    u.lunge = 1;
+    b.fx.push({ kind: 'ring', x: u.x + 6, y: u.y, t0: b.t, dur: 0.4, color: '#ff8a5a', r: 24 });
+  },
+  backstab(s, b, u) {
+    const f = foes(b).reduce((m, x) => (!m || x.hp > m.hp ? x : m), null);
+    if (!f) return;
+    u.x = Math.max(u.x, f.x - 6); u.lunge = 1;
+    hit(s, b, u, f, u.atk * 4.5 * 1.8, { noCrit: true, color: '#ffd34a' });
+  },
+  flurry(s, b, u) {
+    for (let i = 0; i < 8; i++) { const f = pick(foes(b)); if (!f) break; shot(b, u, f, '#d7c4ff'); hit(s, b, u, f, u.atk * 0.9 * 1.8, { noCrit: true, color: '#ffd34a' }); }
+  },
+  smoke(s, b, u) {
+    for (const f of foes(b)) f.dots.push({ dps: u.atk * 3 / 4, until: b.t + 4, kind: 'poison' });
+    u.buff = { atkMul: 1.5, until: b.t + 5, color: '#7dff5a' };
+    b.fx.push({ kind: 'flash', t0: b.t, dur: 0.5, color: '#6fd06a' });
+  },
+  zap(s, b, u) {
+    let from = u;
+    for (const f of foes(b).sort((a, c) => a.x - c.x).slice(0, 4)) { shot(b, from, f, '#bfe9ff'); hit(s, b, u, f, u.atk * 1.6); f.freeze = Math.max(f.freeze, b.t + 0.5); from = f; }
+  },
+  meteor(s, b, u) {
+    for (const f of foes(b)) hit(s, b, u, f, u.atk * 5);
+    b.fx.push({ kind: 'flash', t0: b.t, dur: 0.6, color: '#ffe27a' });
+  },
+  sanctuary(s, b, u) {
+    for (const h of heroes(b)) { heal(b, h, h.maxHp * 0.2); h.regen = { per: h.maxHp * 0.06, until: b.t + 5 }; }
+    b.fx.push({ kind: 'party', t0: b.t, dur: 0.8, color: '#fff2a8' });
+  },
+  dawn(s, b, u) {
+    for (const h of b.units) {
+      if (h.side !== 'hero' || h.summon) continue;
+      if (h.down) { h.down = false; h.hp = h.maxHp * 0.6; float(b, h, 'Revived!', '#fff2a8', true); }
+      else heal(b, h, h.maxHp * 0.25);
+    }
+    b.fx.push({ kind: 'party', t0: b.t, dur: 0.9, color: '#fff2a8' });
+  },
+  skeletons(s, b, u) {
+    for (let i = 0; i < 3; i++) summonUnit(b, u, 'skeleton', { hp: 0.6, atk: 0.6, def: 10 }, 10, LANE_Y[i]);
+  },
+  spiritwolf(s, b, u) { summonUnit(b, u, 'inkwolf', { hp: 1.5, atk: 1.5, def: 15, aspd: 1.2 }, 15, 0.5); },
 };
+
+// Summons stand in front of the front row and draw enemy attacks.
+function summonUnit(b, owner, look, m, secs, y) {
+  const x = FRONT_X + 6 + Math.random() * 3;
+  const w = makeUnit('hero', { hp: owner.maxHp * m.hp, atk: owner.atk * m.atk, aspd: m.aspd || 1.1, range: 8, def: m.def || 0 }, x, y);
+  Object.assign(w, { summon: true, look, expires: b.t + secs, home: x, cls: 'summon', row: 'front' });
+  b.units.push(w);
+  return w;
+}
 
 function fireUlt(s, b, u) {
   if (!u || u.down || u.ult < 100 || !foes(b).length) return false;
@@ -223,7 +293,7 @@ function stepBattle(s, b, dt) {
   while (b.queue.length && b.queue[0].at <= t) {
     const { e } = b.queue.shift();
     const u = makeUnit('foe', e.st, 104 + Math.random() * 3, 0.12 + Math.random() * 0.76);
-    Object.assign(u, { icon: e.icon, name: e.name, boss: e.boss || 0 });
+    Object.assign(u, { type: e.type, icon: e.icon, name: e.name, boss: e.boss || 0 });
     if (e.boss) u.y = 0.5;
     b.units.push(u);
   }
@@ -238,6 +308,7 @@ function stepBattle(s, b, dt) {
       if (u.hp <= 0) onDeath(s, b, u);
     }
     if (u.buff && t >= u.buff.until) u.buff = null;
+    if (u.regen) { if (t < u.regen.until && !u.down) u.hp = Math.min(u.maxHp, u.hp + u.regen.per * dt); else u.regen = null; }
     u.lunge = Math.max(0, u.lunge - dt * 4);
   }
 
@@ -258,7 +329,7 @@ function stepBattle(s, b, dt) {
     const dist = target.x - u.x;
     if (dist > u.range) {
       // melee steps forward to reach foes that hang back; others hold position
-      if (u.cls === 'melee' && target.x < 96 && u.x < u.home + 24) u.x += Math.min(12 * dt, dist - u.range);
+      if (u.range <= 10 && target.x < 96 && u.x < Math.max(u.home, FRONT_X) + 24) u.x += Math.min(12 * dt, dist - u.range);
       continue;
     }
     u.cd -= dt;
@@ -266,18 +337,24 @@ function stepBattle(s, b, dt) {
     u.cd = 1 / u.aspd;
     const atk = u.atk * (u.buff?.atkMul || 1);
     if (u.heroId) u.ult = Math.min(100, u.ult + ULT_CHARGE_PER_HIT * u.ultRate);
-    // mages mend the weakest ally every third cast when someone is hurt
-    if (u.cls === 'mage' && u.heroId) {
+    if (u.heroId && u.cls === 'cleric') {
+      // clerics heal the most wounded hero on every other cast
       u.casts = (u.casts || 0) + 1;
       const weak = hs.filter((h) => !h.down).reduce((m, h) => (!m || h.hp / h.maxHp < m.hp / m.maxHp ? h : m), null);
-      if (u.casts % 3 === 0 && weak && weak.hp / weak.maxHp < 0.75) { heal(b, weak, atk * 1.4); shot(b, u, weak, '#7dff9a'); continue; }
+      if (u.casts % 2 === 0 && weak && weak.hp / weak.maxHp < 0.85) { heal(b, weak, atk * 2.4); shot(b, u, weak, '#fff2a8'); continue; }
     }
-    if (u.cls === 'melee') u.lunge = 1; else shot(b, u, target, u.cls === 'mage' ? '#b9a8ff' : '#f2e3b0');
+    if (u.heroId && u.cls === 'summoner') {
+      u.casts = (u.casts || 0) + 1;
+      const mine = b.units.filter((w) => w.owner === u && !w.down).length;
+      if (u.casts % 4 === 0 && mine < 2) { const w = summonUnit(b, u, 'wisp', { hp: 0.6, atk: 0.8, def: 10 }, 8, u.y); w.owner = u; }
+    }
+    if (u.range <= 10) u.lunge = 1; else shot(b, u, target, { mage: '#ffb26b', cleric: '#fff2a8', summoner: '#7ff0e3' }[u.cls] || '#f2e3b0');
     hit(s, b, u, target, atk);
+    if (u.cls === 'mage') for (const f of foes(b)) if (f !== target && Math.abs(f.x - target.x) < 10 && Math.abs(f.y - target.y) < 0.35) hit(s, b, u, f, atk * 0.4, { noCrit: true });
   }
 
   // foes: move, attack
-  const hf = front(heroes(b));
+  const hf = foeTarget(b);
   for (const u of fs) {
     if (u.hp <= 0) continue;
     if (t < u.freeze) continue;
@@ -324,6 +401,7 @@ function afterPause(s, b) {
   if (wiped) { s.progress.wave = 1; }
   // regroup: summons leave, foes clear; full heal after a wipe or a stage clear, a breather between waves
   b.units = b.units.filter((u) => u.side === 'hero' && !u.summon);
+  b.taunt = null; b.ward = null;
   for (const u of b.units) {
     u.x = u.home; u.dots = []; u.freeze = 0;
     if (wiped || newStage) { u.down = false; u.hp = u.maxHp; u.shield = 0; }

@@ -17,7 +17,8 @@ function newGame() {
   const s = {
     v: 2, created: now, lastTick: now,
     res: { gold: 0, seals: 3 },
-    heroes: {}, party: [],
+    heroes: {}, formation: Array(PARTY_SIZE).fill(null), // slots 0-2 front row, 3-5 back row
+    recruit: { level: 1, xp: 0 }, redeemed: [],
     bag: [], nextItemId: 1, newItems: 0,
     progress: { stage: 0, wave: 1 }, best: 0,
     settings: { autoUlt: true, autoSalvageCommon: false },
@@ -37,8 +38,17 @@ function migrate(s) {
   for (const k of Object.keys(fresh.res)) if (s.res[k] === undefined) s.res[k] = 0;
   for (const k of Object.keys(fresh.settings)) if (s.settings[k] === undefined) s.settings[k] = fresh.settings[k];
   for (const k of Object.keys(fresh.stats)) if (s.stats[k] === undefined) s.stats[k] = 0;
-  s.party = s.party.filter((id) => s.heroes[id]);
-  if (!s.party.length) s.party = Object.keys(s.heroes).slice(0, PARTY_SIZE);
+  for (const id of Object.keys(s.heroes)) if (!HERO_BY_ID[id]) delete s.heroes[id];
+  // v2.0 saves had a 5-hero party list: place them into the 6-slot formation by class row.
+  if (Array.isArray(s.party)) {
+    const old = s.party.filter((id) => s.heroes[id]);
+    delete s.party;
+    s.formation = Array(PARTY_SIZE).fill(null);
+    for (const id of old) placeInFormation(s, id);
+  }
+  s.formation = Array.from({ length: PARTY_SIZE }, (_, i) => (s.heroes[s.formation[i]] ? s.formation[i] : null));
+  s.formation = s.formation.map((id, i) => (id && s.formation.indexOf(id) === i ? id : null));
+  if (!partyOf(s).length) Object.keys(s.heroes).slice(0, PARTY_SIZE).forEach((id) => placeInFormation(s, id));
   return s;
 }
 
@@ -89,8 +99,42 @@ function travel(s, g) {
 
 function addHero(s, id, level = 1) {
   s.heroes[id] = { id, level, xp: 0, stars: 1, gear: Object.fromEntries(SLOT_IDS.map((k) => [k, null])) };
-  if (s.party.length < PARTY_SIZE) s.party.push(id);
+  placeInFormation(s, id);
   return s.heroes[id];
+}
+
+// ---------- formation ----------
+
+const partyOf = (s) => s.formation.filter(Boolean);
+const inParty = (s, id) => s.formation.includes(id);
+const slotRow = (slot) => (slot < FRONT_SLOTS ? 'front' : 'back');
+// Put a hero in the first free slot of the row its class prefers (or any free slot). Returns the slot or -1.
+function placeInFormation(s, id) {
+  if (inParty(s, id)) return s.formation.indexOf(id);
+  const want = CLASSES[HERO_BY_ID[id].cls].row === 'front' ? [0, 1, 2, 3, 4, 5] : [3, 4, 5, 0, 1, 2];
+  const slot = want.find((i) => !s.formation[i]);
+  if (slot === undefined) return -1;
+  s.formation[slot] = id;
+  return slot;
+}
+// Move a hero into a slot. Whoever was there swaps into the hero's old slot (or goes to the bench).
+function setSlot(s, slot, id) {
+  if (slot < 0 || slot >= PARTY_SIZE || (id && !s.heroes[id])) return false;
+  const cur = s.formation[slot];
+  if (!id) { // clear the slot, but never empty the whole party
+    if (!cur || partyOf(s).length <= 1) return false;
+    s.formation[slot] = null;
+    return true;
+  }
+  const from = s.formation.indexOf(id);
+  if (from === slot) return false;
+  s.formation[slot] = id;
+  if (from >= 0) s.formation[from] = cur;
+  return true;
+}
+function benchHero(s, id) {
+  const i = s.formation.indexOf(id);
+  return i >= 0 ? setSlot(s, i, null) : false;
 }
 
 const xpToNext = (lvl) => Math.round(XP_BASE * Math.pow(XP_GROWTH, lvl - 1));
@@ -116,7 +160,7 @@ function heroStats(h, swap) {
     aspd: c.aspd * (1 + Math.min(g.spd, STAT_CAPS.spd) / 100),
     range: c.range,
     def: Math.min(STAT_CAPS.def, c.def + g.def),
-    crit: Math.min(STAT_CAPS.crit, 5 + g.crit),
+    crit: Math.min(STAT_CAPS.crit, 5 + c.crit + g.crit),
     ls: Math.min(STAT_CAPS.ls, g.ls),
     ult: Math.min(STAT_CAPS.ult, g.ult),
   };
@@ -128,7 +172,7 @@ function statPower(st) {
   return Math.round(Math.sqrt(dps * ehp) * 4);
 }
 const heroPower = (h, swap) => statPower(heroStats(h, swap));
-const partyPower = (s) => s.party.reduce((a, id) => a + heroPower(s.heroes[id]), 0);
+const partyPower = (s) => partyOf(s).reduce((a, id) => a + heroPower(s.heroes[id]), 0);
 
 function gainXp(s, h, xp, events) {
   h.xp += xp;
@@ -153,26 +197,55 @@ function trainMax(s, id) {
   return n;
 }
 
+// Swap the contents of two slots (either may be empty).
+function swapSlots(s, a, b) {
+  if (a === b || a < 0 || b < 0 || a >= PARTY_SIZE || b >= PARTY_SIZE) return false;
+  [s.formation[a], s.formation[b]] = [s.formation[b], s.formation[a]];
+  return true;
+}
+// Strongest heroes fill the formation; front-row classes take the front, the rest the back.
+function autoArrange(s) {
+  const ids = Object.keys(s.heroes).sort((a, b) => heroPower(s.heroes[b]) - heroPower(s.heroes[a])).slice(0, PARTY_SIZE);
+  const front = ids.filter((id) => CLASSES[HERO_BY_ID[id].cls].row === 'front');
+  const back = ids.filter((id) => CLASSES[HERO_BY_ID[id].cls].row !== 'front');
+  while (front.length > FRONT_SLOTS) back.push(front.pop());
+  while (back.length > PARTY_SIZE - FRONT_SLOTS) front.push(back.shift()); // sturdiest-looking spare goes forward
+  s.formation = Array(PARTY_SIZE).fill(null);
+  front.forEach((id, i) => { s.formation[i] = id; });
+  back.forEach((id, i) => { s.formation[FRONT_SLOTS + i] = id; });
+  return true;
+}
+
 function toggleParty(s, id) {
-  const i = s.party.indexOf(id);
-  if (i >= 0) { if (s.party.length > 1) s.party.splice(i, 1); return; }
-  if (s.party.length < PARTY_SIZE) s.party.push(id);
+  if (inParty(s, id)) return benchHero(s, id);
+  return placeInFormation(s, id) >= 0;
 }
 
 // ---------- recruiting ----------
 
 function freeSummonReady(s, now = Date.now()) { return now >= s.freeSummonAt; }
 
-function summon(s, free = false, now = Date.now()) {
-  if (free) { if (!freeSummonReady(s, now)) return null; s.freeSummonAt = now + FREE_SUMMON_SECONDS * 1000; }
-  else { if (s.res.seals < RECRUIT_COST) return null; s.res.seals -= RECRUIT_COST; }
-  s.stats.summons++;
-  const rarity = weighted(RECRUIT_WEIGHTS);
-  const def = pick(HEROES.filter((h) => h.rarity === rarity));
+const recruitOdds = (level) => RECRUIT_ODDS[clamp(level, 1, RECRUIT_MAX_LEVEL) - 1];
+const recruitXpToNext = (level) => (level >= RECRUIT_MAX_LEVEL ? Infinity : RECRUIT_XP[level - 1]);
+
+function gainRecruitXp(s, n) {
+  const r = s.recruit;
+  let up = 0;
+  r.xp += n;
+  while (r.level < RECRUIT_MAX_LEVEL && r.xp >= recruitXpToNext(r.level)) { r.xp -= recruitXpToNext(r.level); r.level++; up++; }
+  if (r.level >= RECRUIT_MAX_LEVEL) r.xp = 0;
+  return up;
+}
+
+// Adds a hero of the given rarity: a new face if possible, otherwise a star (or gold at max stars).
+function grantHero(s, rarity, preferNew = false) {
+  let pool = HEROES.filter((h) => h.rarity === rarity);
+  if (preferNew && pool.some((h) => !s.heroes[h.id])) pool = pool.filter((h) => !s.heroes[h.id]);
+  const def = pick(pool);
   const owned = s.heroes[def.id];
   if (!owned) {
     // Newcomers train with the band: they join at 60% of your best hero's level.
-    const top = Math.max(...Object.values(s.heroes).map((h) => h.level));
+    const top = Math.max(1, ...Object.values(s.heroes).map((h) => h.level));
     addHero(s, def.id, Math.max(1, Math.floor(top * 0.6)));
     return { heroId: def.id, isNew: true };
   }
@@ -180,6 +253,48 @@ function summon(s, free = false, now = Date.now()) {
   const gold = Math.round(DUPE_AT_MAX_GOLD * Math.pow(GOLD_STAGE_GROWTH, s.best));
   s.res.gold += gold;
   return { heroId: def.id, gold };
+}
+
+function summon(s, free = false, now = Date.now()) {
+  if (free) { if (!freeSummonReady(s, now)) return null; s.freeSummonAt = now + FREE_SUMMON_SECONDS * 1000; }
+  else { if (s.res.seals < RECRUIT_COST) return null; s.res.seals -= RECRUIT_COST; }
+  s.stats.summons++;
+  const r = grantHero(s, weighted(recruitOdds(s.recruit.level)));
+  r.recruitUp = gainRecruitXp(s, 1);
+  return r;
+}
+function summonMany(s, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) { const r = summon(s); if (!r) break; out.push(r); }
+  return out;
+}
+
+// ---------- redeem codes ----------
+
+function redeemCode(s, raw) {
+  const code = String(raw || '').trim().toUpperCase().replace(/\s+/g, '');
+  if (!code) return { ok: false, msg: 'Type a code first.' };
+  if (!REDEEM_CODES[code]) return { ok: false, msg: `“${code}” is not a valid code.` };
+  if (s.redeemed.includes(code)) return { ok: false, msg: `${code} has already been used on this save.` };
+  let msg;
+  if (code === 'BANNER2026') { s.res.gold += 5000; msg = '+5,000 🪙 gold!'; }
+  else if (code === 'HEROROAD') { s.res.seals += 10; msg = '+10 🔮 Summon Seals: that’s 10 free recruits!'; }
+  else if (code === 'LOOTDROP') {
+    const items = ['weapon', 'armour', 'shield'].map((slot) => makeItem(s, s.best + 1, 3, slot));
+    items.forEach((it) => { s.bag.push(it); s.newItems++; s.stats.items++; });
+    msg = `3 Epic items are in your Bag: ${items.map((i) => i.name).join(', ')}.`;
+  } else if (code === 'FRONTLINE') {
+    const ids = partyOf(s);
+    ids.forEach((id) => { s.heroes[id].level += 5; });
+    msg = `+5 training levels for ${ids.length} heroes in your formation!`;
+  } else if (code === 'LEGEND') {
+    const r = grantHero(s, 4, true), d = HERO_BY_ID[r.heroId];
+    msg = r.isNew ? `Legendary ${d.name} joins your band!` : r.stars ? `Legendary ${d.name} gains a star (${r.stars}★)!` : `Legendary ${d.name} was maxed: +${r.gold} 🪙`;
+    s.stats.summons++;
+    return (s.redeemed.push(code), { ok: true, code, msg, summon: r });
+  }
+  s.redeemed.push(code);
+  return { ok: true, code, msg };
 }
 
 // ---------- gear ----------
@@ -282,7 +397,7 @@ function offlineRewards(s, seconds) {
   rep.gold = Math.round(gps * seconds * OFFLINE_EFFICIENCY);
   rep.xp = Math.round(xps * seconds * OFFLINE_EFFICIENCY);
   s.res.gold += rep.gold;
-  for (const id of s.party) {
+  for (const id of partyOf(s)) {
     const h = s.heroes[id], before = h.level;
     gainXp(s, h, rep.xp);
     if (h.level > before) rep.levels.push({ heroId: id, from: before, to: h.level });
