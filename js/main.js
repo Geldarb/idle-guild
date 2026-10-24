@@ -138,13 +138,14 @@ window.addEventListener('pagehide', save);
 // ---------- service worker: offline play + "update ready" prompt ----------
 
 let swReg = null;
+let updateRequested = false; // only reload when the player tapped "update", never on first install
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').then((reg) => {
     swReg = reg;
     const offer = (w) => {
       const bar = $('#update-bar');
       bar.hidden = false;
-      bar.onclick = () => { bar.textContent = 'Updating…'; w.postMessage('skip-waiting'); };
+      bar.onclick = () => { bar.textContent = 'Updating…'; updateRequested = true; w.postMessage('skip-waiting'); };
     };
     if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
     reg.addEventListener('updatefound', () => {
@@ -157,7 +158,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   }).catch((e) => console.warn('SW registration failed', e));
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (reloading) return;
+    if (reloading || !updateRequested) return;
     reloading = true;
     save();
     location.reload();

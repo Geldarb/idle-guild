@@ -1,7 +1,7 @@
 // Bump VERSION on every release so players get the "update available" prompt.
-const VERSION = 'lantern-hall-1.0.0';
-const ASSETS = ['./', 'index.html', 'style.css?v=1.0.0', 'js/data.js?v=1.0.0', 'js/game.js?v=1.0.0', 'js/ui.js?v=1.0.0',
-  'js/main.js?v=1.0.0', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
+const VERSION = 'lantern-hall-1.0.1';
+const ASSETS = ['./', 'index.html', 'style.css?v=1.0.1', 'js/data.js?v=1.0.1', 'js/game.js?v=1.0.1', 'js/ui.js?v=1.0.1',
+  'js/main.js?v=1.0.1', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS)));

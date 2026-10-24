@@ -1,7 +1,7 @@
 // Static game data. New content (facilities, operations, quest tiers, classes) goes here.
 'use strict';
 
-const GAME_VERSION = '1.0.0';
+const GAME_VERSION = '1.0.1';
 const SAVE_KEY = 'lanternhall-save';
 const OFFLINE_CAP_SECONDS = 24 * 3600;
 
