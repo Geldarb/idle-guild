@@ -1,294 +1,297 @@
-// Game rules and state. No DOM here: everything takes the state and returns or mutates it.
+// Game rules and state. No DOM here, so it also runs in Node for balance sims.
 'use strict';
 
-const rand = (n) => Math.floor(Math.random() * n);
-const pick = (arr) => arr[rand(arr.length)];
-
-function weightedIndex(weights) {
-  let roll = Math.random() * weights.reduce((a, b) => a + b, 0);
-  for (let i = 0; i < weights.length; i++) { roll -= weights[i]; if (roll < 0) return i; }
-  return 0;
+const rnd = Math.random;
+const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function weighted(weights) {
+  let r = rnd() * weights.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < weights.length; i++) { r -= weights[i]; if (r < 0) return i; }
+  return weights.length - 1;
 }
 
-// ---------- state ----------
+// ---------- new game & saves ----------
 
-function newGame(now = Date.now()) {
+function newGame() {
+  const now = Date.now();
   const s = {
-    v: 1,
-    guildName: 'The Lantern Hall',
-    res: { gold: 40, supplies: 10, renown: 0 },
-    facilities: { commons: 1, workshop: 0 },     // room id -> level (0 = not built)
-    ops: { lanterns: 0, provisions: 0 },          // operation id -> level (0 = not opened)
-    overseers: {},                                // operation id -> adventurer id
-    adventurers: [],
-    quests: [],                                   // active quests
-    board: {},                                    // quest tier id -> current posting
-    recruits: [],
-    recruitRefreshAt: now + RECRUIT_FREE_REFRESH_SECONDS * 1000,
-    nextId: 1,
-    stats: { questsDone: 0, questsFailed: 0 },
-    lastTick: now,
-    // hooks for later systems (exploration, hirelings...) keep their own state here
-    ext: {},
+    v: 2, created: now, lastTick: now,
+    res: { gold: 0, seals: 3 },
+    heroes: {}, party: [],
+    bag: [], nextItemId: 1, newItems: 0,
+    progress: { stage: 0, wave: 1 }, best: 0,
+    settings: { autoUlt: true, autoSalvageCommon: false },
+    freeSummonAt: now, // first free summon is ready right away
+    rate: { gold: 0, xp: 0 }, // live earnings per second (smoothed), drives offline rewards
+    stats: { kills: 0, bosses: 0, wipes: 0, summons: 0, items: 0 },
+    note: null,
+    ext: {}, // room for future systems (pets, merchants) without breaking saves
   };
-  const starter = makeAdventurer(s, 0, 'ironwarden');
-  s.adventurers.push(starter);
-  s.recruits = rollRecruits(s);
-  for (const t of QUEST_TIERS) s.board[t.id] = makePosting(t);
+  for (const id of STARTERS) addHero(s, id);
   return s;
 }
 
-// Upgrade an older save to the current shape. Add a step per save version.
 function migrate(s) {
   const fresh = newGame();
   for (const k of Object.keys(fresh)) if (s[k] === undefined) s[k] = fresh[k];
   for (const k of Object.keys(fresh.res)) if (s.res[k] === undefined) s.res[k] = 0;
-  for (const k of Object.keys(fresh.facilities)) if (s.facilities[k] === undefined) s.facilities[k] = 0;
-  for (const k of Object.keys(fresh.ops)) if (s.ops[k] === undefined) s.ops[k] = 0;
-  for (const t of QUEST_TIERS) if (!s.board[t.id]) s.board[t.id] = makePosting(t);
-  s.v = 1;
+  for (const k of Object.keys(fresh.settings)) if (s.settings[k] === undefined) s.settings[k] = fresh.settings[k];
+  for (const k of Object.keys(fresh.stats)) if (s.stats[k] === undefined) s.stats[k] = 0;
+  s.party = s.party.filter((id) => s.heroes[id]);
+  if (!s.party.length) s.party = Object.keys(s.heroes).slice(0, PARTY_SIZE);
   return s;
 }
 
-// ---------- renown & adventurers ----------
-
-function rankIndex(renown) {
-  let r = 0;
-  RANKS.forEach((rank, i) => { if (renown >= rank.at) r = i; });
-  return r;
-}
-
-function makeName() { return `${pick(NAME_PARTS.first)} ${pick(NAME_PARTS.last)}`; }
-
-function makeAdventurer(s, rarity, cls = pick(Object.keys(CLASSES)), level = 1) {
-  const mult = RARITIES[rarity].mult;
-  const g = CLASSES[cls].growth;
-  const base = {};
-  for (const k of Object.keys(STATS)) base[k] = Math.round((3 + g[k] + rand(3)) * mult);
-  const a = { id: s.nextId++, name: makeName(), cls, rarity, level: 1, xp: 0, base, stats: { ...base } };
-  for (let i = 1; i < level; i++) levelUp(a);
-  return a;
-}
-
-function xpToNext(level) { return Math.round(10 * Math.pow(1.35, level - 1)); }
-
-function levelUp(a) {
-  a.level++;
-  const g = CLASSES[a.cls].growth, mult = RARITIES[a.rarity].mult;
-  for (const k of Object.keys(STATS)) a.stats[k] += Math.max(1, Math.round(g[k] * mult));
-}
-
-function gainXp(a, xp) {
-  a.xp += xp;
-  let gained = 0;
-  while (a.xp >= xpToNext(a.level)) { a.xp -= xpToNext(a.level); levelUp(a); gained++; }
-  return gained;
-}
-
-function power(a) { return a.stats.mig + a.stats.agi + a.stats.wit; }
-
-function adventurerTask(s, id) {
-  for (const [op, advId] of Object.entries(s.overseers)) if (advId === id) return { type: 'oversee', op };
-  const q = s.quests.find((q) => q.advId === id);
-  return q ? { type: 'quest', quest: q } : null;
-}
-
-function findAdventurer(s, id) { return s.adventurers.find((a) => a.id === id); }
-
-function rosterCap(s) { return 2 + s.facilities.commons; }
-
-// ---------- recruiting ----------
-
-function rollRecruit(s) {
-  const r = rankIndex(s.res.renown);
-  const rarity = weightedIndex(RANKS[r].weights);
-  const level = 1 + rand(r + 1);
-  const a = makeAdventurer(s, rarity, undefined, level);
-  a.hireCost = Math.round(20 * RARITIES[rarity].hireMult * (1 + 0.25 * (level - 1)));
-  return a;
-}
-
-function rollRecruits(s) {
-  const list = [];
-  for (let i = 0; i < RECRUIT_SLOTS; i++) list.push(rollRecruit(s));
-  return list;
-}
-
-function rerollCost(s) { return 10 * (1 + rankIndex(s.res.renown)); }
-
-function hire(s, id) {
-  const i = s.recruits.findIndex((a) => a.id === id);
-  if (i < 0 || s.adventurers.length >= rosterCap(s)) return false;
-  const a = s.recruits[i];
-  if (!spend(s, 'gold', a.hireCost)) return false;
-  delete a.hireCost;
-  s.adventurers.push(a);
-  s.recruits.splice(i, 1, rollRecruit(s));
-  return true;
-}
-
-function dismiss(s, id) {
-  if (adventurerTask(s, id)?.type === 'quest') return false;
-  for (const [op, advId] of Object.entries(s.overseers)) if (advId === id) delete s.overseers[op];
-  s.adventurers = s.adventurers.filter((a) => a.id !== id);
-  return true;
-}
-
-// ---------- economy ----------
-
-function spend(s, res, amount) {
-  if (s.res[res] < amount) return false;
-  s.res[res] -= amount;
-  return true;
-}
-
-function facilityCost(id, level) {
-  const f = FACILITIES[id];
-  if (level === 0) return f.buildCost;
-  return Math.round(f.upgradeBase * Math.pow(f.upgradeGrowth, level - 1));
-}
-
-function upgradeFacility(s, id) {
-  const f = FACILITIES[id], lvl = s.facilities[id] || 0;
-  if (f.comingSoon || lvl >= f.maxLevel) return false;
-  if (!spend(s, 'gold', facilityCost(id, lvl))) return false;
-  s.facilities[id] = lvl + 1;
-  return true;
-}
-
-function opUnlocked(s, id) { return (s.facilities.workshop || 0) >= OPERATIONS[id].unlockAt; }
-
-function opCost(id, level) { const o = OPERATIONS[id]; return Math.round(o.costBase * Math.pow(o.costGrowth, level)); }
-
-function milestoneMult(level) { return Math.pow(2, OP_MILESTONES.filter((m) => level >= m).length); }
-
-function nextMilestone(level) { return OP_MILESTONES.find((m) => m > level); }
-
-function overseerBonus(s, opId) {
-  const a = findAdventurer(s, s.overseers[opId]);
-  if (!a) return 0;
-  return (a.stats[OPERATIONS[opId].stat] * 2 + a.level * 3) / 100;
-}
-
-// Resource per second produced by one operation.
-function opRate(s, id, level = s.ops[id]) {
-  if (!level || !opUnlocked(s, id)) return 0;
-  const o = OPERATIONS[id];
-  const workshop = 1 + WORKSHOP_LEVEL_BONUS * ((s.facilities.workshop || 1) - 1);
-  return o.base * level * milestoneMult(level) * workshop * (1 + overseerBonus(s, id));
-}
-
-function totalRates(s) {
-  const r = { gold: 0, supplies: 0, renown: 0 };
-  for (const id of Object.keys(OPERATIONS)) r[OPERATIONS[id].res] += opRate(s, id);
-  return r;
-}
-
-function upgradeOp(s, id) {
-  if (!opUnlocked(s, id)) return false;
-  if (!spend(s, 'gold', opCost(id, s.ops[id]))) return false;
-  s.ops[id]++;
-  return true;
-}
-
-function assignOverseer(s, opId, advId) {
-  if (advId != null && adventurerTask(s, advId)) return false;
-  if (advId == null) delete s.overseers[opId];
-  else s.overseers[opId] = advId;
-  return true;
-}
-
-// ---------- quests ----------
-
-function makePosting(tier) { return { title: pick(QUEST_TITLES[tier.id]), stat: pick(Object.keys(STATS)) }; }
-
-function tierUnlocked(s, tier) { return rankIndex(s.res.renown) >= tier.minRank; }
-
-// Adventurers whose best stat matches the posting's favoured stat get +20% power.
-function questPower(a, posting) {
-  const best = Object.keys(STATS).reduce((b, k) => (a.stats[k] > a.stats[b] ? k : b), 'mig');
-  return power(a) * (best === posting.stat ? 1.2 : 1);
-}
-
-function successChance(a, tier, posting) {
-  const ratio = questPower(a, posting) / tier.req;
-  return Math.max(0.1, Math.min(0.97, 0.15 + 0.7 * ratio));
-}
-
-function startQuest(s, tierId, advId, now = Date.now()) {
-  const tier = QUEST_TIERS.find((t) => t.id === tierId);
-  const a = findAdventurer(s, advId);
-  if (!tier || !a || !tierUnlocked(s, tier) || adventurerTask(s, advId)) return false;
-  if (!spend(s, 'supplies', tier.supplies)) return false;
-  const posting = s.board[tierId];
-  s.quests.push({ id: s.nextId++, tier: tierId, advId, title: posting.title, stat: posting.stat,
-                  chance: successChance(a, tier, posting), start: now, end: now + tier.dur * 1000 });
-  s.board[tierId] = makePosting(tier);
-  return true;
-}
-
-function resolveQuest(s, q, report) {
-  const tier = QUEST_TIERS.find((t) => t.id === q.tier);
-  const a = findAdventurer(s, q.advId);
-  s.quests = s.quests.filter((x) => x !== q);
-  if (!a) return;
-  const success = Math.random() < q.chance;
-  const gold = success ? tier.gold : 0;
-  const renown = success ? tier.renown : 0;
-  const xp = success ? tier.xp : Math.ceil(tier.xp / 2);
-  s.res.gold += gold;
-  s.res.renown += renown;
-  const levels = gainXp(a, xp);
-  s.stats[success ? 'questsDone' : 'questsFailed']++;
-  report.gold += gold;
-  report.renown += renown;
-  report.quests.push({ title: q.title, name: a.name, success, gold, renown, xp, levels, newLevel: a.level });
-}
-
-// ---------- time ----------
-
-function emptyReport() { return { seconds: 0, gold: 0, supplies: 0, renown: 0, quests: [] }; }
-
-// Move the world forward to `now`. Works the same for one frame or a day offline.
-function advance(s, now = Date.now(), report = emptyReport()) {
-  const seconds = Math.min(Math.max(0, (now - s.lastTick) / 1000), OFFLINE_CAP_SECONDS);
-  const rates = totalRates(s);
-  for (const k of Object.keys(rates)) { s.res[k] += rates[k] * seconds; report[k] += rates[k] * seconds; }
-  report.seconds += seconds;
-  for (const advId of Object.values(s.overseers)) {
-    const a = findAdventurer(s, advId);
-    if (!a) continue;
-    a.oxp = (a.oxp || 0) + (seconds / 60) * OVERSEER_XP_PER_MIN;
-    const whole = Math.floor(a.oxp);
-    if (whole) { a.oxp -= whole; gainXp(a, whole); }
-  }
-  for (const q of [...s.quests].sort((a, b) => a.end - b.end)) if (q.end <= now) resolveQuest(s, q, report);
-  if (now >= s.recruitRefreshAt) {
-    s.recruits = rollRecruits(s);
-    s.recruitRefreshAt = now + RECRUIT_FREE_REFRESH_SECONDS * 1000;
-    report.newRecruits = true;
-  }
-  for (const sys of EXTENSIONS) sys.advance?.(s, seconds, report);
-  s.lastTick = now;
-  return report;
-}
-
-// Later systems (exploration, hirelings, more facilities) register here: { id, advance(s, seconds, report) }.
-const EXTENSIONS = [];
-
-// ---------- saves ----------
+class OldSaveError extends Error {}
 
 function serialize(s) { return JSON.stringify(s); }
-
 function deserialize(text) {
   const s = JSON.parse(text);
-  if (!s || typeof s !== 'object' || !s.res || !Array.isArray(s.adventurers)) throw new Error('Not a Lantern Hall save');
+  if (s && Array.isArray(s.adventurers)) throw new OldSaveError('Lantern Hall v1 save');
+  if (!s || s.v !== 2 || !s.heroes || !s.res) throw new Error('Not a Banner Road save');
   return migrate(s);
 }
-
 function exportCode(s) { return btoa(unescape(encodeURIComponent(serialize(s)))); }
-
 function importCode(code) {
   const text = code.trim();
   return deserialize(text.startsWith('{') ? text : decodeURIComponent(escape(atob(text))));
+}
+
+// ---------- stages ----------
+
+function stageInfo(g) {
+  const lastWorld = WORLDS.length - 1;
+  const wi = Math.min(Math.floor(g / STAGES_PER_WORLD), lastWorld);
+  const world = WORLDS[wi];
+  const endless = g >= WORLDS.length * STAGES_PER_WORLD;
+  const si = endless ? (g % STAGES_PER_WORLD) : g % STAGES_PER_WORLD;
+  const st = world.stages[si];
+  const depth = g - WORLDS.length * STAGES_PER_WORLD + 1;
+  return {
+    g, world, wi, si, endless, boss: st.boss,
+    name: endless ? `Endless Road ${depth}` : st.name,
+    label: endless ? `∞-${depth}` : `${wi + 1}-${si + 1}`,
+  };
+}
+const enemyScale = (g, wave) => Math.pow(STAGE_GROWTH, g) * (1 + WAVE_GROWTH * (wave - 1));
+const goldPerKill = (g, wave) => GOLD_PER_KILL * Math.pow(GOLD_STAGE_GROWTH, g) * (1 + 0.05 * (wave - 1));
+const xpPerKill = (g) => XP_PER_KILL * Math.pow(XP_STAGE_GROWTH, g);
+const isSubBoss = (wave) => wave === SUBBOSS_EVERY;
+const isBoss = (wave) => wave === WAVES_PER_STAGE;
+
+function travel(s, g) {
+  if (g < 0 || g > s.best) return false;
+  s.progress = { stage: g, wave: 1 };
+  return true;
+}
+
+// ---------- heroes ----------
+
+function addHero(s, id, level = 1) {
+  s.heroes[id] = { id, level, xp: 0, stars: 1, gear: Object.fromEntries(SLOT_IDS.map((k) => [k, null])) };
+  if (s.party.length < PARTY_SIZE) s.party.push(id);
+  return s.heroes[id];
+}
+
+const xpToNext = (lvl) => Math.round(XP_BASE * Math.pow(XP_GROWTH, lvl - 1));
+const trainCost = (lvl) => Math.round(TRAIN_BASE * Math.pow(TRAIN_GROWTH, lvl - 1));
+
+function gearTotals(h, swap) {
+  const t = { atk: 0, hp: 0, spd: 0, crit: 0, def: 0, ls: 0, ult: 0 };
+  for (const slot of SLOT_IDS) {
+    const it = swap && swap.slot === slot ? swap.item : h.gear[slot];
+    if (it) for (const [k, v] of Object.entries(it.stats)) t[k] += v;
+  }
+  return t;
+}
+
+// Full combat numbers for a hero. `swap` = {slot, item} previews a gear change.
+function heroStats(h, swap) {
+  const def = HERO_BY_ID[h.id], c = CLASSES[def.cls];
+  const mult = HERO_RARITY_STAT[def.rarity] * Math.pow(LEVEL_GROWTH, h.level - 1) * (1 + STAR_BONUS * (h.stars - 1));
+  const g = gearTotals(h, swap);
+  return {
+    hp: Math.round(c.hp * mult + g.hp),
+    atk: Math.round((c.atk * mult + g.atk) * 10) / 10,
+    aspd: c.aspd * (1 + Math.min(g.spd, STAT_CAPS.spd) / 100),
+    range: c.range,
+    def: Math.min(STAT_CAPS.def, c.def + g.def),
+    crit: Math.min(STAT_CAPS.crit, 5 + g.crit),
+    ls: Math.min(STAT_CAPS.ls, g.ls),
+    ult: Math.min(STAT_CAPS.ult, g.ult),
+  };
+}
+
+function statPower(st) {
+  const dps = st.atk * st.aspd * (1 + st.crit / 100 * 0.8) * (1 + st.ult / 300);
+  const ehp = st.hp / (1 - st.def / 100) * (1 + st.ls / 100);
+  return Math.round(Math.sqrt(dps * ehp) * 4);
+}
+const heroPower = (h, swap) => statPower(heroStats(h, swap));
+const partyPower = (s) => s.party.reduce((a, id) => a + heroPower(s.heroes[id]), 0);
+
+function gainXp(s, h, xp, events) {
+  h.xp += xp;
+  let up = 0;
+  while (h.xp >= xpToNext(h.level)) { h.xp -= xpToNext(h.level); h.level++; up++; }
+  if (up && events) events.push({ type: 'level', heroId: h.id, level: h.level });
+  return up;
+}
+
+function train(s, id) {
+  const h = s.heroes[id];
+  if (!h) return false;
+  const c = trainCost(h.level);
+  if (s.res.gold < c) return false;
+  s.res.gold -= c;
+  h.level++;
+  return true;
+}
+function trainMax(s, id) {
+  let n = 0;
+  while (n < 500 && train(s, id)) n++;
+  return n;
+}
+
+function toggleParty(s, id) {
+  const i = s.party.indexOf(id);
+  if (i >= 0) { if (s.party.length > 1) s.party.splice(i, 1); return; }
+  if (s.party.length < PARTY_SIZE) s.party.push(id);
+}
+
+// ---------- recruiting ----------
+
+function freeSummonReady(s, now = Date.now()) { return now >= s.freeSummonAt; }
+
+function summon(s, free = false, now = Date.now()) {
+  if (free) { if (!freeSummonReady(s, now)) return null; s.freeSummonAt = now + FREE_SUMMON_SECONDS * 1000; }
+  else { if (s.res.seals < RECRUIT_COST) return null; s.res.seals -= RECRUIT_COST; }
+  s.stats.summons++;
+  const rarity = weighted(RECRUIT_WEIGHTS);
+  const def = pick(HEROES.filter((h) => h.rarity === rarity));
+  const owned = s.heroes[def.id];
+  if (!owned) {
+    // Newcomers train with the band: they join at 60% of your best hero's level.
+    const top = Math.max(...Object.values(s.heroes).map((h) => h.level));
+    addHero(s, def.id, Math.max(1, Math.floor(top * 0.6)));
+    return { heroId: def.id, isNew: true };
+  }
+  if (owned.stars < MAX_STARS) { owned.stars++; return { heroId: def.id, stars: owned.stars }; }
+  const gold = Math.round(DUPE_AT_MAX_GOLD * Math.pow(GOLD_STAGE_GROWTH, s.best));
+  s.res.gold += gold;
+  return { heroId: def.id, gold };
+}
+
+// ---------- gear ----------
+
+function rollStat(k, il, rarity, share) {
+  const m = RARITIES[rarity].mult * share * (0.8 + rnd() * 0.4);
+  if (ITEM_FLAT[k] != null) return Math.max(1, Math.round(ITEM_FLAT[k] * Math.pow(ITEM_FLAT_GROWTH, il - 1) * m));
+  return Math.round(ITEM_PCT[k] * m * (1 + 0.03 * (il - 1)) * 10) / 10;
+}
+
+function makeItem(s, il, rarity, slot = pick(SLOT_IDS)) {
+  const sd = SLOTS[slot];
+  const stats = { [sd.main]: rollStat(sd.main, il, rarity, 1) };
+  const pool = Object.keys(STATS).filter((k) => k !== sd.main);
+  const bonus = [];
+  for (let i = 0; i < rarity; i++) { // rarer items roll extra bonus stats
+    const k = pool.splice(Math.floor(rnd() * pool.length), 1)[0];
+    stats[k] = rollStat(k, il, rarity, 0.45);
+    bonus.push(k);
+  }
+  const mat = MATERIALS[Math.min(MATERIALS.length - 1, Math.floor((il - 1) / 2))];
+  const name = `${mat} ${pick(sd.bases)}${bonus.length ? ` ${SUFFIXES[bonus[0]]}` : ''}`;
+  return { id: s.nextItemId++, slot, rarity, il, name, main: sd.main, stats, isNew: true };
+}
+
+const salvageValue = (it) => Math.round(SALVAGE_BASE * (it.rarity + 1) * (it.rarity + 1) * Math.pow(GOLD_STAGE_GROWTH, it.il - 1));
+
+// Adds a drop to the bag. Never blocks: a full bag salvages the weakest item for gold.
+function addLoot(s, item) {
+  s.stats.items++;
+  if (s.settings.autoSalvageCommon && item.rarity === 0) { s.res.gold += salvageValue(item); return { salvaged: item }; }
+  if (s.bag.length >= BAG_CAP) {
+    let worst = 0;
+    for (let i = 1; i < s.bag.length; i++) if (itemRank(s.bag[i]) < itemRank(s.bag[worst])) worst = i;
+    if (itemRank(item) <= itemRank(s.bag[worst])) { s.res.gold += salvageValue(item); return { salvaged: item }; }
+    const out = s.bag.splice(worst, 1)[0];
+    s.res.gold += salvageValue(out);
+    s.bag.push(item); s.newItems++;
+    return { added: item, salvaged: out };
+  }
+  s.bag.push(item); s.newItems++;
+  return { added: item };
+}
+const itemRank = (it) => it.rarity * 1000 + it.il;
+
+function rollLoot(s, g, weights) { return makeItem(s, g + 1, weighted(weights)); }
+
+function equip(s, heroId, itemId) {
+  const h = s.heroes[heroId], i = s.bag.findIndex((x) => x.id === itemId);
+  if (!h || i < 0) return false;
+  const it = s.bag.splice(i, 1)[0];
+  it.isNew = false;
+  const old = h.gear[it.slot];
+  h.gear[it.slot] = it;
+  if (old) s.bag.push(old);
+  return true;
+}
+function unequip(s, heroId, slot) {
+  const h = s.heroes[heroId];
+  if (!h || !h.gear[slot]) return false;
+  s.bag.push(h.gear[slot]);
+  h.gear[slot] = null;
+  return true;
+}
+function salvage(s, itemId) {
+  const i = s.bag.findIndex((x) => x.id === itemId);
+  if (i < 0) return 0;
+  const v = salvageValue(s.bag.splice(i, 1)[0]);
+  s.res.gold += v;
+  return v;
+}
+function salvageUpTo(s, maxRarity) {
+  let gold = 0, n = 0;
+  s.bag = s.bag.filter((it) => { if (it.rarity <= maxRarity) { gold += salvageValue(it); n++; return false; } return true; });
+  s.res.gold += gold;
+  return { gold, n };
+}
+// Best upgrade in the bag for a hero's slot, by power gained.
+function bestUpgrade(s, h, slot) {
+  const base = heroPower(h);
+  let best = null;
+  for (const it of s.bag) {
+    if (it.slot !== slot) continue;
+    const d = heroPower(h, { slot, item: it }) - base;
+    if (d > 0 && (!best || d > best.delta)) best = { item: it, delta: d };
+  }
+  return best;
+}
+
+// ---------- offline ----------
+
+// While away the party keeps farming its current stage (never pushes past a boss).
+function offlineRewards(s, seconds) {
+  seconds = Math.min(seconds, OFFLINE_CAP_SECONDS);
+  const g = s.progress.stage;
+  const rep = { seconds, gold: 0, xp: 0, items: [], salvagedGold: 0, levels: [] };
+  const estGold = goldPerKill(g, 5) * 0.35, estXp = xpPerKill(g) * 0.35;
+  const gps = clamp(s.rate.gold || estGold, estGold * 0.25, estGold * 4);
+  const xps = clamp(s.rate.xp || estXp, estXp * 0.25, estXp * 4);
+  rep.gold = Math.round(gps * seconds * OFFLINE_EFFICIENCY);
+  rep.xp = Math.round(xps * seconds * OFFLINE_EFFICIENCY);
+  s.res.gold += rep.gold;
+  for (const id of s.party) {
+    const h = s.heroes[id], before = h.level;
+    gainXp(s, h, rep.xp);
+    if (h.level > before) rep.levels.push({ heroId: id, from: before, to: h.level });
+  }
+  const rolls = Math.min(60, Math.floor(seconds / OFFLINE_LOOT_EVERY));
+  for (let i = 0; i < rolls; i++) {
+    const res = addLoot(s, rollLoot(s, g, LOOT_RARITY_WEIGHTS));
+    if (res.added) rep.items.push(res.added);
+    if (res.salvaged) rep.salvagedGold += salvageValue(res.salvaged);
+  }
+  return rep;
 }

@@ -1,97 +1,142 @@
-// Static game data. New content (facilities, operations, quest tiers, classes) goes here.
+// All tunable content lives here: heroes, enemies, worlds, gear and balance numbers.
 'use strict';
 
-const GAME_VERSION = '1.0.1';
-const SAVE_KEY = 'lanternhall-save';
+const GAME_VERSION = '2.0.0';
+const GAME_TITLE = 'Banner Road';
+const SAVE_KEY = 'bannerroad-save';
+const CLASSIC_SAVE_KEY = 'lanternhall-save'; // Lantern Hall v1 lives on at /classic/ and keeps this save; never touch it
+const CLASSIC_URL = 'classic/';
 const OFFLINE_CAP_SECONDS = 24 * 3600;
+const PARTY_SIZE = 5;
+const BAG_CAP = 40;
 
 const RESOURCES = {
-  gold:     { name: 'Gold',     icon: '🪙' },
-  supplies: { name: 'Supplies', icon: '🎒' },
-  renown:   { name: 'Renown',   icon: '⭐' },
+  gold: { name: 'Gold', icon: '🪙' },
+  seals: { name: 'Summon Seals', icon: '🔮' },
 };
 
-const STATS = { mig: 'Might', agi: 'Agility', wit: 'Wit' };
+// ---------- heroes ----------
 
-// growth = stat points gained per level (before rarity multiplier).
 const CLASSES = {
-  ironwarden:   { name: 'Ironwarden',   icon: '🛡️', growth: { mig: 3, agi: 1, wit: 1 } },
-  thornstrider: { name: 'Thornstrider', icon: '🏹', growth: { mig: 1, agi: 3, wit: 1 } },
-  runecaller:   { name: 'Runecaller',   icon: '🔮', growth: { mig: 1, agi: 1, wit: 3 } },
-  emberpriest:  { name: 'Emberpriest',  icon: '🔥', growth: { mig: 2, agi: 1, wit: 2 } },
-  gloamblade:   { name: 'Gloamblade',   icon: '🗡️', growth: { mig: 2, agi: 2, wit: 1 } },
+  melee: { name: 'Melee', icon: '🛡️', color: '#d9694a', hp: 130, atk: 7, aspd: 0.8, range: 8, def: 15,
+    blurb: 'Frontline tank. Holds the line so the others can work.' },
+  ranged: { name: 'Ranged', icon: '🏹', color: '#6fbf5a', hp: 70, atk: 8, aspd: 1.5, range: 60, def: 0,
+    blurb: 'Fast shots. Drops enemies before they reach the front.' },
+  mage: { name: 'Mage', icon: '🔮', color: '#8a7cf0', hp: 65, atk: 11, aspd: 0.7, range: 50, def: 0,
+    blurb: 'Spells, heals, buffs and summons.' },
 };
 
 const RARITIES = [
-  { name: 'Plain',     mult: 1.0,  hireMult: 1,  color: '#b8aa98' },
-  { name: 'Promising', mult: 1.2,  hireMult: 2.5, color: '#5fd38a' },
-  { name: 'Gifted',    mult: 1.45, hireMult: 6,  color: '#66a8ff' },
-  { name: 'Storied',   mult: 1.75, hireMult: 15, color: '#c38bff' },
-  { name: 'Fabled',    mult: 2.1,  hireMult: 40, color: '#ffc94a' },
+  { id: 'common', name: 'Common', color: '#b9b4ad', mult: 1 },
+  { id: 'uncommon', name: 'Uncommon', color: '#6fd48f', mult: 1.35 },
+  { id: 'rare', name: 'Rare', color: '#5aa8ff', mult: 1.8 },
+  { id: 'epic', name: 'Epic', color: '#c77dff', mult: 2.4 },
+  { id: 'legendary', name: 'Legendary', color: '#ffb547', mult: 3.2 },
 ];
+const HERO_RARITY_STAT = [1, 1.12, 1.25, 1.42, 1.6];
+const RECRUIT_WEIGHTS = [52, 27, 14, 5.5, 1.5]; // by hero rarity
+const RECRUIT_COST = 1; // seals per summon
+const FREE_SUMMON_SECONDS = 30 * 60;
+const MAX_STARS = 5;
+const STAR_BONUS = 0.25; // +25% hp/atk per star above 1
+const DUPE_AT_MAX_GOLD = 200; // gold per duplicate once a hero is 5 stars (scaled by stage)
 
-// Renown ranks: each rank improves recruit odds and opens the next quest tier.
-const RANKS = [
-  { name: 'Unknown',   at: 0,    weights: [80, 18, 2, 0, 0] },
-  { name: 'Whispered', at: 25,   weights: [60, 30, 9, 1, 0] },
-  { name: 'Known',     at: 120,  weights: [40, 35, 20, 5, 0] },
-  { name: 'Respected', at: 500,  weights: [25, 35, 27, 11, 2] },
-  { name: 'Renowned',  at: 1800, weights: [12, 30, 33, 19, 6] },
-  { name: 'Legendary', at: 6000, weights: [5, 20, 35, 28, 12] },
+// Ultimate kinds are implemented in battle.js (ULT_EFFECTS).
+const HEROES = [
+  { id: 'brannoc', name: 'Brannoc Stoneward', cls: 'melee', rarity: 0, ult: { kind: 'slam', name: 'Bulwark Slam', desc: 'Smashes the ground: 2× damage to nearby foes and freezes them for 1.5s.' } },
+  { id: 'kessa', name: 'Kessa Ironvein', cls: 'melee', rarity: 1, ult: { kind: 'bloodthirst', name: 'Bloodthirst', desc: 'For 6s: +40% attack and 60% lifesteal.' } },
+  { id: 'harl', name: 'Old Harl the Unbent', cls: 'melee', rarity: 2, ult: { kind: 'rally', name: 'Rally Banner', desc: 'Shields every hero for 35% of Harl’s max HP.' } },
+  { id: 'vexa', name: 'Vexa Dreadhelm', cls: 'melee', rarity: 3, ult: { kind: 'roar', name: 'Dread Roar', desc: 'Fears all foes for 3s (they flee and stop attacking) and deals 1.5× damage.' } },
+  { id: 'pip', name: 'Pip Quickstring', cls: 'ranged', rarity: 0, ult: { kind: 'volley', name: 'Volley', desc: 'Looses 6 arrows at random foes for 1.3× damage each.' } },
+  { id: 'sorrel', name: 'Sorrel Venomfletch', cls: 'ranged', rarity: 1, ult: { kind: 'viper', name: 'Viper Shot', desc: 'Poisons the 3 nearest foes for 5× damage over 6s.' } },
+  { id: 'tamsin', name: 'Tamsin Farsight', cls: 'ranged', rarity: 2, ult: { kind: 'pin', name: 'Pinning Shot', desc: 'Hits the toughest foe for 7× damage and freezes it for 2s.' } },
+  { id: 'rook', name: 'Rook Hallowbolt', cls: 'ranged', rarity: 4, ult: { kind: 'embers', name: 'Rain of Embers', desc: 'Hits every foe for 1.5× and sets them burning for 3× over 5s.' } },
+  { id: 'wren', name: 'Wren Mossmantle', cls: 'mage', rarity: 0, ult: { kind: 'mend', name: 'Mending Rain', desc: 'Heals every hero for 35% of their max HP.' } },
+  { id: 'ilsabet', name: 'Ilsabet Frostweave', cls: 'mage', rarity: 2, ult: { kind: 'frost', name: 'Glacial Bloom', desc: 'Freezes every foe for 2.5s and deals 1.2× damage.' } },
+  { id: 'corvin', name: 'Corvin Ashtongue', cls: 'mage', rarity: 3, ult: { kind: 'nova', name: 'Cinder Nova', desc: '2.5× damage to every foe, plus a 2× burn over 4s.' } },
+  { id: 'yew', name: 'Mother Yew', cls: 'mage', rarity: 4, ult: { kind: 'grove', name: 'Call of the Grove', desc: 'Summons 2 thorn-stags for 12s and heals the party 20%.' } },
 ];
+const HERO_BY_ID = Object.fromEntries(HEROES.map((h) => [h.id, h]));
+const STARTERS = ['brannoc', 'pip', 'wren'];
+const ULT_CHARGE_PER_SEC = 4;  // passive, out of 100
+const ULT_CHARGE_PER_HIT = 6;  // dealing an attack
+const ULT_CHARGE_PER_HURT = 3; // taking a hit
+const REVIVE_SECONDS = 10;
 
-// Rooms of the guild hall, in build order. `comingSoon` rooms are hooks for later versions.
-const FACILITIES = {
-  commons:  { name: 'Common Room', icon: '🍺', desc: 'Bunks and a crackling hearth. Each level houses one more adventurer.',
-              buildCost: 0, upgradeBase: 40, upgradeGrowth: 2.6, maxLevel: 15 },
-  workshop: { name: 'Workshop', icon: '🔨', desc: 'Benches, a forge and a packing table. Runs operations that earn while you rest.',
-              buildCost: 20, upgradeBase: 150, upgradeGrowth: 3, maxLevel: 10, ops: ['lanterns', 'provisions'] },
-  maproom:  { name: 'Map Room', icon: '🗺️', comingSoon: 'Exploration: send scouts to chart new regions.' },
-  barracks: { name: 'Barracks', icon: '⚔️', comingSoon: 'Hirelings: hire hands to staff your operations.' },
+// Hero growth and training
+const LEVEL_GROWTH = 1.11;           // hp/atk per level
+const TRAIN_BASE = 12, TRAIN_GROWTH = 1.2; // gold cost of the next level
+const XP_BASE = 35, XP_GROWTH = 1.24;      // xp needed for the next level from fighting
+
+// ---------- worlds & enemies ----------
+
+const ENEMIES = {
+  wolf: { name: 'Mangy Wolf', icon: '🐺', hp: 1, atk: 1, speed: 14, aspd: 1, range: 6 },
+  spider: { name: 'Thicket Spider', icon: '🕷️', hp: 0.7, atk: 0.8, speed: 20, aspd: 1.4, range: 6 },
+  boar: { name: 'Tusked Boar', icon: '🐗', hp: 1.8, atk: 1.1, speed: 10, aspd: 0.7, range: 6 },
+  goblin: { name: 'Bramble Slinger', icon: '👺', hp: 0.8, atk: 0.9, speed: 12, aspd: 0.9, range: 32 },
+  bones: { name: 'Rattlebones', icon: '💀', hp: 1, atk: 1, speed: 12, aspd: 1, range: 6 },
+  ghoul: { name: 'Grave Shambler', icon: '🧟', hp: 1.9, atk: 1.1, speed: 8, aspd: 0.7, range: 6 },
+  shade: { name: 'Wailing Shade', icon: '👻', hp: 0.8, atk: 1, speed: 13, aspd: 0.8, range: 34 },
+  scorp: { name: 'Ash Scorpion', icon: '🦂', hp: 0.9, atk: 1, speed: 18, aspd: 1.3, range: 6 },
+  // sub-bosses and bosses
+  bear: { name: 'Gnarlback', icon: '🐻', hp: 9, atk: 2.2, speed: 9, aspd: 0.7, range: 8, size: 1.5 },
+  troll: { name: 'Moss Troll', icon: '🧌', hp: 24, atk: 3.2, speed: 7, aspd: 0.6, range: 9, size: 2 },
+  ogre: { name: 'Mother Thornhide', icon: '👹', hp: 26, atk: 3.4, speed: 7, aspd: 0.6, range: 9, size: 2 },
+  mummy: { name: 'Bound Warden', icon: '🧛', hp: 9, atk: 2.2, speed: 9, aspd: 0.8, range: 8, size: 1.5 },
+  lich: { name: 'The Hollow King', icon: '☠️', hp: 26, atk: 3.4, speed: 6, aspd: 0.7, range: 30, size: 2 },
+  wyrm: { name: 'Vharrok the Ash Wyrm', icon: '🐉', hp: 30, atk: 3.6, speed: 6, aspd: 0.6, range: 12, size: 2.2 },
 };
 
-// Each workshop level adds this much output to every operation.
-const WORKSHOP_LEVEL_BONUS = 0.15;
-// Operation output doubles at each of these levels.
-const OP_MILESTONES = [10, 25, 50, 75, 100, 150, 200];
-
-const OPERATIONS = {
-  lanterns:   { name: 'Lantern Forging', icon: '🏮', res: 'gold', base: 0.4, stat: 'mig', unlockAt: 1,
-                costBase: 12, costGrowth: 1.21, desc: 'Brass storm-lanterns, sold to night travellers on the Old Road.' },
-  provisions: { name: 'Provision Packing', icon: '🎒', res: 'supplies', base: 0.06, stat: 'wit', unlockAt: 2,
-                costBase: 60, costGrowth: 1.23, desc: 'Trail bread, rope and lamp oil, packed for questing parties.' },
-};
-
-// Quest tiers. minRank = renown rank index needed. req = party power for ~85% success.
-const QUEST_TIERS = [
-  { id: 'errand', name: 'Errand',     icon: '📜', minRank: 0, dur: 30,   req: 20,  gold: 12,   xp: 8,    renown: 2,   supplies: 0 },
-  { id: 'patrol', name: 'Patrol',     icon: '🛤️', minRank: 1, dur: 180,  req: 45,  gold: 70,   xp: 40,   renown: 6,   supplies: 4 },
-  { id: 'hunt',   name: 'Hunt',       icon: '🐗', minRank: 2, dur: 900,  req: 100, gold: 400,  xp: 160,  renown: 18,  supplies: 15 },
-  { id: 'delve',  name: 'Delve',      icon: '🕳️', minRank: 3, dur: 2700, req: 210, gold: 1500, xp: 500,  renown: 50,  supplies: 40 },
-  { id: 'saga',   name: 'Saga',       icon: '🐉', minRank: 4, dur: 7200, req: 420, gold: 5000, xp: 1600, renown: 150, supplies: 100 },
+const WORLDS = [
+  { id: 'bramble', name: 'Bramblewood', sky: ['#22324a', '#3f5a4a'], ground: '#2f4a2a', groundLine: '#47693c',
+    mobs: ['wolf', 'spider', 'boar', 'goblin'], sub: 'bear',
+    stages: [{ name: 'Mossy Trail', boss: 'troll' }, { name: 'Wolfsong Hollow', boss: 'bear' }, { name: 'Thornheart Glade', boss: 'troll' }, { name: 'The Bramble Throne', boss: 'ogre' }] },
+  { id: 'crypt', name: 'Ashen Barrows', sky: ['#2a1d2e', '#5a3a3a'], ground: '#3a2e2a', groundLine: '#5a4636',
+    mobs: ['bones', 'ghoul', 'shade', 'scorp'], sub: 'mummy',
+    stages: [{ name: 'Cinder Gate', boss: 'lich' }, { name: 'Ossuary Steps', boss: 'mummy' }, { name: 'The Sunken Choir', boss: 'lich' }, { name: 'Wyrm’s Rest', boss: 'wyrm' }] },
 ];
+const STAGES_PER_WORLD = 4;
+const WAVES_PER_STAGE = 10;
+const SUBBOSS_EVERY = 5; // wave 5 is a sub-boss, the last wave is the stage boss
 
-const QUEST_TITLES = {
-  errand: ['Fetch herbs from Mossy Hollow', 'Chase rats from the Copper Kettle', 'Deliver a sealed letter to Pellford',
-           'Find the miller\'s lost goat', 'Escort a cheesemonger across Wren Bridge', 'Clear crows from the barley fields'],
-  patrol: ['Walk the Old Road at dusk', 'Guard the Saltmarsh toll gate', 'Scout the Brindle woods',
-           'Watch the caravan camp at Dunmere', 'Sweep the hill shrines for bandits'],
-  hunt:   ['Track the tusked beast of Harrow Fen', 'Drive off the cinder wolves', 'Hunt the barrow stalker',
-           'Bring down the moss troll of Grey Ford'],
-  delve:  ['Descend into the Sunken Cistern', 'Map the Hollow King\'s crypt', 'Recover relics from Ashpit Mine',
-           'Seal the Weeping Vault'],
-  saga:   ['Wake the drowned bell of Orrin', 'Duel the storm wyrm on Kestrel Peak', 'Unmake the Lantern Eater'],
+// Enemy power: each stage is a clear step up, waves inside a stage ramp gently.
+const ENEMY_HP = 46, ENEMY_ATK = 4.6;
+const STAGE_GROWTH = 2.1, WAVE_GROWTH = 0.05;
+const GOLD_PER_KILL = 3, GOLD_STAGE_GROWTH = 1.5;
+const XP_PER_KILL = 2, XP_STAGE_GROWTH = 1.45;
+const SUBBOSS_SEALS = 1, BOSS_SEALS = 2;
+
+// ---------- gear ----------
+
+const STATS = {
+  atk: { name: 'Attack', pct: false },
+  hp: { name: 'Health', pct: false },
+  spd: { name: 'Attack speed', pct: true },
+  crit: { name: 'Crit chance', pct: true },
+  def: { name: 'Armour', pct: true },
+  ls: { name: 'Lifesteal', pct: true },
+  ult: { name: 'Ultimate charge', pct: true },
 };
-
-const NAME_PARTS = {
-  first: ['Ael', 'Bran', 'Cora', 'Dov', 'Eli', 'Fen', 'Gwyn', 'Hal', 'Isa', 'Jory', 'Kael', 'Lio', 'Mira', 'Nell', 'Oren',
-          'Pip', 'Quill', 'Rhea', 'Sav', 'Tamsin', 'Ulla', 'Vey', 'Wren', 'Yara', 'Zed', 'Bryn', 'Odo', 'Tilda', 'Cass', 'Merrin'],
-  last:  ['Ashby', 'Brightwater', 'Coldbrook', 'Dunmore', 'Emberley', 'Fallowmere', 'Greythorn', 'Hollin', 'Ironside',
-          'Kettlewick', 'Larkspur', 'Mossgrave', 'Nightingale', 'Oakhart', 'Pennywhistle', 'Quarrel', 'Rookwood',
-          'Stonefield', 'Thistle', 'Underhill', 'Vane', 'Whitlow'],
+const SLOTS = {
+  weapon: { name: 'Weapon', icon: '🗡️', main: 'atk', bases: ['Sword', 'Axe', 'Longbow', 'Wand', 'Mace', 'Spear'] },
+  armour: { name: 'Armour', icon: '🥋', main: 'hp', bases: ['Jerkin', 'Hauberk', 'Robe', 'Brigandine', 'Cuirass'] },
+  shield: { name: 'Shield', icon: '🛡️', main: 'def', bases: ['Buckler', 'Kite Shield', 'Ward', 'Tower Shield'] },
+  ring: { name: 'Ring', icon: '💍', main: 'crit', bases: ['Band', 'Signet', 'Loop', 'Seal Ring'] },
+  charm: { name: 'Accessory', icon: '📿', main: 'ult', bases: ['Amulet', 'Totem', 'Talisman', 'Locket', 'Charm'] },
 };
+const SLOT_IDS = Object.keys(SLOTS);
+// Flat stats scale with item level; percentages scale with rarity only (and lightly with level).
+const ITEM_FLAT = { atk: 3, hp: 26 }, ITEM_FLAT_GROWTH = 1.45;
+const ITEM_PCT = { spd: 4, crit: 4, def: 4, ls: 3, ult: 7 };
+const STAT_CAPS = { def: 60, crit: 60, ls: 50, spd: 150, ult: 200 };
+const ITEM_DROP_CHANCE = 0.07; // per normal kill
+const LOOT_RARITY_WEIGHTS = [60, 26, 10, 3.4, 0.6];
+const BOSS_LOOT_WEIGHTS = [10, 35, 35, 16, 4];
+const MATERIALS = ['Rusty', 'Iron', 'Steel', 'Runed', 'Moonsilver', 'Starforged', 'Dawnmetal', 'Voidglass'];
+const SUFFIXES = { atk: 'of the Boar', hp: 'of the Oak', spd: 'of the Hare', crit: 'of the Hawk', def: 'of the Turtle', ls: 'of the Leech', ult: 'of Embers' };
+const SALVAGE_BASE = 4; // gold
 
-const RECRUIT_SLOTS = 3;
-// Overseers learn on the job: XP per minute spent overseeing.
-const OVERSEER_XP_PER_MIN = 2;
-const RECRUIT_FREE_REFRESH_SECONDS = 600;
+// Offline: how much of a live session's earnings you keep while away.
+const OFFLINE_EFFICIENCY = 0.6;
+const OFFLINE_LOOT_EVERY = 240; // seconds per offline loot roll

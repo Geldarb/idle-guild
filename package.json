@@ -1,6 +1,6 @@
 {
   "name": "idle-guild",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Lantern Hall: an original idle fantasy guild-management browser game.",
   "scripts": { "start": "node server.js" },
